@@ -1350,9 +1350,19 @@ struct BankCache {
     uint32_t index = 0, size = 0;
     uint64_t at = 0;
     uint64_t bind_gen = ~0ull;   // (the bindings it was made for: the same and no new grid, the same bank)
+    uint64_t stamp = ~0ull;      // (a bank with the pointer table: the pools it was read with, gpu_bind_stamp)
     uint32_t grid[3]{};
     std::vector<uint8_t> bytes;
 };
+/// (issue 574) c0 of a compute, task or mesh stage that reaches the pointer table (0x880, vk_bank.cpp pointer_table): the
+/// table comes from buffers' contents and their pools, not from the bindings, so a pool remade or mirrored since
+/// (gpu_bind_stamp) fills the bank again, also within one recording; other banks stand on the bindings alone
+bool bank_reads_table(uint32_t index, int nvn_stage, uint32_t n) {
+    return index == 0 && nvn_stage >= 5 && nvn_stage <= 7 && n > 0x880;
+}
+bool bank_kept(uint64_t gen, uint64_t for_gen, bool table, uint64_t stamp, uint64_t for_stamp) {
+    return gen == for_gen && (!table || stamp == for_stamp);
+}
 thread_local BankCache bank_cache[2][kNvnStages];   // [c0 or c2][NVN stage]: the last upload (draws in a row share most of it)
 
 VkDescriptorBufferInfo uniform_range(const NvnState& s, const Stage& st, uint32_t index) {
@@ -1368,7 +1378,10 @@ VkDescriptorBufferInfo uniform_range(const NvnState& s, const Stage& st, uint32_
         BankCache& c = bank_cache[index == 2][std::clamp(st.nvn_stage, 0, kNvnStages - 1)];
         const bool grid_same = st.nvn_stage != 5 || !std::memcmp(c.grid, s.grid, sizeof c.grid);
         static const bool no_bank_cache = getenv("RX_VK_NO_DESC_REUSE") != nullptr;   // (A/B: filled every time)
-        if (!no_bank_cache && c.at != UINT64_MAX && c.bind_gen == s.bind_gen && grid_same && c.size >= n)
+        const bool table = bank_reads_table(index, st.nvn_stage, n);
+        const uint64_t stamp = table ? gpu_bind_stamp() : 0;
+        if (!no_bank_cache && c.at != UINT64_MAX && bank_kept(s.bind_gen, c.bind_gen, table, stamp, c.stamp) && grid_same &&
+            c.size >= n)
             return {cur->stream, c.at, n};
         static thread_local std::vector<uint8_t> tmp;
         tmp.resize(n);
@@ -1382,7 +1395,7 @@ VkDescriptorBufferInfo uniform_range(const NvnState& s, const Stage& st, uint32_
                     logf("vk: bank c%u stage %d word %#x: fill %#x, word path %#x", index, st.nvn_stage, off,
                          *(const uint32_t*)(tmp.data() + off), w);
             }
-        c.bind_gen = s.bind_gen;
+        c.bind_gen = s.bind_gen, c.stamp = stamp;
         std::memcpy(c.grid, s.grid, sizeof c.grid);
         if (c.at != UINT64_MAX && c.size >= n && c.bytes.size() >= n && !std::memcmp(c.bytes.data(), tmp.data(), n) &&
             c.prog != nullptr)
@@ -2143,6 +2156,7 @@ thread_local bool work_since_barrier = false;   // (GPU work recorded since the 
 thread_local bool last_desc_valid = false;
 thread_local const Program* last_desc_prog = nullptr;
 thread_local uint64_t last_desc_bind = 0, last_desc_reg = 0, last_desc_ub = 0;
+thread_local uint64_t last_desc_stamp = 0;   // (a task/mesh program's set: the pools its pointer table was read with)
 thread_local VkPipeline last_pipeline = VK_NULL_HANDLE;
 struct LastVb { VkBuffer b[16]; VkDeviceSize o[16], z[16], s[16]; };
 thread_local LastVb last_vb;
@@ -4080,8 +4094,11 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     // when none changed since the last draw, the set it pushed or bound stands)
     const uint64_t reg_gen = registrations_generation(), ub_gen = ub_generation();
     static const bool no_reuse = getenv("RX_VK_NO_DESC_REUSE") != nullptr;   // (A/B: every draw builds its own)
+    // (issue 574: a task/mesh program binds its pointer table's regions, c0+0x880, found in buffers' contents and pools:
+    // a pool remade or mirrored since the set was built builds it again, also within one recording)
+    const uint64_t desc_stamp = p.mesh ? gpu_bind_stamp() : 0;
     const bool same_desc = !no_reuse && last_desc_valid && last_desc_prog == &p && last_desc_bind == s.bind_gen &&
-                           last_desc_reg == reg_gen && last_desc_ub == ub_gen;
+                           last_desc_reg == reg_gen && last_desc_ub == ub_gen && desc_stamp == last_desc_stamp;
     if (!same_desc) {
         PROF(PROF_DESC);
         trace_tex_hit = nullptr, trace_tex_mask = 0;
@@ -4189,7 +4206,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     if (!same_desc) {
         if (!bind_descriptors(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p)) SKIP_HERE();
         last_desc_valid = true, last_desc_prog = &p, last_desc_bind = s.bind_gen, last_desc_reg = reg_gen;
-        last_desc_ub = ub_gen;
+        last_desc_ub = ub_gen, last_desc_stamp = desc_stamp;
     } else {
         st_desc_reused++;
     }

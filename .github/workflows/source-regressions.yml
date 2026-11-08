@@ -54,6 +54,8 @@ on:
       - tests/test_ub_memo.py
       - tests/test_ub_gap.py
       - tests/test_bind_memo.py
+      - tests/test_pointer_table.py
+      - gpu/vk/vk_bank.cpp
       - tests/test_shader_census_cmd.py
       - tests/test_shader_census.py
       - tests/test_prepare_cache_save.py
@@ -169,6 +171,8 @@ on:
       - tests/test_ub_memo.py
       - tests/test_ub_gap.py
       - tests/test_bind_memo.py
+      - tests/test_pointer_table.py
+      - gpu/vk/vk_bank.cpp
       - tests/test_shader_census_cmd.py
       - tests/test_shader_census.py
       - tests/test_prepare_cache_save.py
@@ -369,6 +373,9 @@ jobs:
       - name: Check a repeated read bind is not looked up again
         if: runner.os == 'Linux'
         run: python -I -B tests/test_bind_memo.py
+      - name: Check the pointer table is read again each submission
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_pointer_table.py
       - name: Check the shader list's text encoding
         run: python -I -B tests/test_shader_census_cmd.py
       - name: Check the shader list has the game's compute programs

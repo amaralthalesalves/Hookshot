@@ -641,6 +641,12 @@ bool buf_unchanged(int32_t stage, int32_t index, uint64_t addr, uint64_t size, i
                    uint64_t naddr, uint64_t nsize) {
     return stage == nstage && index == nindex && addr == naddr && size == nsize;
 }
+/// (RX_VK_BIND_EVERY=1: every bind counts as a new one, as before same-value binds kept their descriptors (9cffaeb):
+/// issue 574's A/B, white specks and spikes on some NVIDIA cards since then)
+bool bind_every() {
+    static const bool v = getenv("RX_VK_BIND_EVERY") != nullptr;
+    return v;
+}
 
 void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* end = nullptr) {
     const Mode mode = rmode;
@@ -864,7 +870,7 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
             const auto b = payload<nvn_p_bind_program>(a, avail);
             // (the same program bound again: its descriptors already stand)
             const bool same = b.prog && s.has_prog ? std::memcmp(&s.prog, b.prog, sizeof s.prog) == 0 : !b.prog && !s.has_prog;
-            if (!same) s.bind_gen++;
+            if (!same || bind_every()) s.bind_gen++;
             if (b.prog) s.prog = *b.prog;
             s.has_prog = b.prog != nullptr && b.prog->nstage > 0;
             break;
@@ -941,7 +947,7 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
                              (unsigned long long)b.r[i].address, (unsigned long long)b.r[i].size);
                 }
                 nvn_p_bind_buf& u = (b.ssbo ? s.ssbo : s.ubo)[b.stage][index];
-                if (!buf_unchanged(u.stage, u.index, u.addr, u.size, b.stage, index, b.r[i].address, b.r[i].size))
+                if (!buf_unchanged(u.stage, u.index, u.addr, u.size, b.stage, index, b.r[i].address, b.r[i].size) || bind_every())
                     s.bind_gen++;
                 u.stage = b.stage, u.index = index, u.addr = b.r[i].address, u.size = b.r[i].size;
             }
@@ -959,7 +965,7 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
             }
             if (b.stage >= 0 && b.stage < kNvnStages && b.index >= 0 && b.index < 16) {
                 nvn_p_bind_buf& u = (h.op == NOP_BIND_UBO ? s.ubo : s.ssbo)[b.stage][b.index];
-                if (!buf_unchanged(u.stage, u.index, u.addr, u.size, b.stage, b.index, b.addr, b.size)) s.bind_gen++;
+                if (!buf_unchanged(u.stage, u.index, u.addr, u.size, b.stage, b.index, b.addr, b.size) || bind_every()) s.bind_gen++;
                 u = b;
             }
             break;
@@ -979,7 +985,7 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
             const int lim = h.op == NOP_BIND_IMG ? 32 : 128;
             int n = 0;
             while (n < b.n && b.first + n < lim) n++;
-            if (!handles_unchanged(to + b.first, b.h, n)) s.bind_gen++;   // (the same handles: the draw keeps its descriptors)
+            if (!handles_unchanged(to + b.first, b.h, n) || bind_every()) s.bind_gen++;   // (the same handles: the draw keeps its descriptors)
             for (int k = 0; k < n; k++) to[b.first + k] = b.h[k];
             break;
         }
@@ -1045,7 +1051,7 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
                 const bool same = (uint64_t)u.offset + u.size <= s.cs_push_n && std::memcmp(s.cs_push + u.offset, src, u.size) == 0;
                 std::memcpy(s.cs_push + u.offset, src, u.size);
                 s.cs_push_n = std::max<uint32_t>(s.cs_push_n, u.offset + u.size);
-                if (!same) s.bind_gen++;
+                if (!same || bind_every()) s.bind_gen++;
             }
             break;
         }

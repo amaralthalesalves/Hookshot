@@ -209,13 +209,21 @@ void driver_bank(const NvnState& s, int bank, int stage, uint8_t d[0xA00]) {
 // gave 0: skinned and instanced models lost their bones and collapsed into spikes.
 struct PointerEntry { uint64_t addr, size; };
 constexpr uint32_t kPointerTable = 0x880, kPointerEntries = 3;
+/// The table found before still stands: the same bindings, state and stage, and the same submission and pools (issue 574:
+/// it is read from the buffers' contents, which change with no bind at all. Since a rebind of the same buffer keeps
+/// bind_gen (9cffaeb), a queue that binds the same small buffer every frame kept the first frame's pointers, or none)
+bool pointer_table_kept(uint64_t gen, uint64_t stamp, const void* state, int stage, uint64_t for_gen, uint64_t for_stamp,
+                        const void* for_state, int for_stage) {
+    return gen == for_gen && stamp == for_stamp && state == for_state && stage == for_stage;
+}
 const PointerEntry* pointer_table(const NvnState& s, int stage) {
     thread_local PointerEntry e[kPointerEntries];
-    thread_local uint64_t for_gen = ~0ull;
+    thread_local uint64_t for_gen = ~0ull, for_stamp = ~0ull;
     thread_local const NvnState* for_state = nullptr;
     thread_local int for_stage = -1;
-    if (for_gen == s.bind_gen && for_state == &s && for_stage == stage) return e;
-    for_gen = s.bind_gen, for_state = &s, for_stage = stage;
+    const uint64_t stamp = gpu_bind_stamp();   // (a new submission, or a pool gone or mirrored: the contents read again)
+    if (pointer_table_kept(s.bind_gen, stamp, &s, stage, for_gen, for_stamp, for_state, for_stage)) return e;
+    for_gen = s.bind_gen, for_stamp = stamp, for_state = &s, for_stage = stage;
     std::memset(e, 0, sizeof e);
     uint64_t found[32];
     uint32_t n = 0;
